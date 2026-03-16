@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Year;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -277,6 +278,191 @@ class RecommendationScoringServiceTest {
 
         assertNotNull(list);
         assertTrue(list.isEmpty());
+    }
+
+    @Test
+    void testParallelMatchesSync() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        User user = new User(1, List.of("Action"), List.of(), List.of(), List.of());
+
+        List<RecommendationDTO> sync = service.getRecommendations(user);
+        List<RecommendationDTO> parallel = service.getRecommendationsParallel(user);
+
+        assertEquals(sync.size(), parallel.size());
+
+
+    }
+    @Test
+    void testParallelSorted() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        User user = new User(1, List.of("Drama"), List.of(), List.of(), List.of());
+
+        List<RecommendationDTO> list = service.getRecommendationsParallel(user);
+
+        for (int i = 0; i < list.size() - 1; i++) {
+            assertTrue(list.get(i).finalScore() >= list.get(i + 1).finalScore());
+        }
+    }
+    @Test
+    void testParallelNullUser() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        List<RecommendationDTO> list = service.getRecommendationsParallel(null);
+
+        assertTrue(list.isEmpty());
+    }
+
+    @Test
+    void testAsyncScoresComplete() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        User user = new User(1, List.of("Action"), List.of(), List.of(), List.of());
+        Movie movie = MovieDataGenerator.getAllMovies().get(0);
+
+        CompletableFuture<Double> genre = service.computeGenreScoreAsync(user, movie);
+        CompletableFuture<Double> actor = service.computeActorScoreAsync(user, movie);
+        CompletableFuture<Double> rating = service.computeRatingSimilarityScoreAsync(user, movie);
+        CompletableFuture<Double> pop = service.computePopularityScoreAsync(movie);
+
+        assertTrue(genre.join() >= 0);
+        assertTrue(actor.join() >= 0);
+        assertTrue(rating.join() >= 0);
+        assertTrue(pop.join() >= 0);
+    }
+
+    @Test
+    void testAsyncFinalScoreMatchesSync() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        User user = new User(1, List.of("Drama"), List.of(), List.of(), List.of());
+        Movie movie = MovieDataGenerator.getAllMovies().get(0);
+
+        double sync = service.finalRecommendationScore(user, movie);
+
+        CompletableFuture<RecommendationDTO> asyncDto =
+                service.computeRecommendationAsync(user, movie);
+
+        assertTrue(sync>0 && asyncDto.join().finalScore()>0);
+    }
+
+    @Test
+    void testAsyncMatchesSync() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        User user = new User(1, List.of("Action"), List.of(), List.of(), List.of());
+
+        List<RecommendationDTO> sync = service.getRecommendations(user);
+        List<RecommendationDTO> async = service.getRecommendationsAsync(user).join();
+
+        assertEquals(sync.size(), async.size());
+
+
+    }
+
+
+    @Test
+    void testAsyncSorted() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        User user = new User(1, List.of("Drama"), List.of(), List.of(), List.of());
+
+        List<RecommendationDTO> list = service.getRecommendationsAsync(user).join();
+
+        for (int i = 0; i < list.size() - 1; i++) {
+            assertTrue(list.get(i).finalScore() >= list.get(i + 1).finalScore());
+        }
+    }
+
+    @Test
+    void testHybridMatchesSync() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        User user = new User(1, List.of("Action"), List.of(), List.of(), List.of());
+
+        List<RecommendationDTO> sync = service.getRecommendations(user);
+        List<RecommendationDTO> hybrid = service.getRecommendationsHybrid(user).join();
+
+        assertEquals(sync.size(), hybrid.size());
+
+
+    }
+
+    @Test
+    void testHybridSorted() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        User user = new User(1, List.of("Drama"), List.of(), List.of(), List.of());
+
+        List<RecommendationDTO> list = service.getRecommendationsHybrid(user).join();
+
+        for (int i = 0; i < list.size() - 1; i++) {
+            assertTrue(list.get(i).finalScore() >= list.get(i + 1).finalScore());
+        }
+    }
+
+    @Test
+    void testHybridNullUser() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        List<RecommendationDTO> list = service.getRecommendationsHybrid(null).join();
+
+        assertTrue(list.isEmpty());
+    }
+
+    @Test
+    void testPopularityCaching() {
+        RecommendationScoringService service = new RecommendationScoringService();
+        Movie movie = MovieDataGenerator.getAllMovies().get(0);
+
+        double first = service.computePopularityScoreCached(movie);
+        double second = service.computePopularityScoreCached(movie);
+
+        assertEquals(first, second);
+    }
+
+
+    @Test
+    void testPopularityCacheSize() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        List<Movie> movies = MovieDataGenerator.getAllMovies();
+        movies.forEach(service::computePopularityScoreCached);
+
+        assertEquals(movies.size(), service.getPopularityCacheSize());
+    }
+
+    @Test
+    void testGenreCacheMatchesOriginal() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+
+        double original = service.computeGenreScore(user, movie);
+        double cached = service.computeGenreScoreCached(user, movie);
+
+        assertEquals(original, cached, 0.0001);
+    }
+
+
+    @Test
+    void testGenreCacheStoresValue() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+
+        service.computeGenreScoreCached(user, movie);
+
+        String key = user.userId() + ":" + movie.movieId() + ":genre";
+        assertTrue(service.genreCache.contains(key));
+    }
+    @Test
+    void testGenreCacheAvoidsRecomputation() {
+        RecommendationScoringService service = new RecommendationScoringService();
+
+        double first = service.computeGenreScoreCached(user, movie);
+        double second = service.computeGenreScoreCached(user, movie);
+
+        assertEquals(first, second);
     }
 
 

@@ -1,5 +1,6 @@
 package com.reshwanth.movieengine.service;
 
+import com.reshwanth.movieengine.config.CustomThreadPool;
 import com.reshwanth.movieengine.domain.Movie;
 import com.reshwanth.movieengine.domain.MovieRating;
 import com.reshwanth.movieengine.domain.User;
@@ -12,8 +13,71 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ForkJoinPool;
+
 
 public class RecommendationScoringService {
+
+    private final ConcurrentHashMap<Long, Double> popularityCache = new ConcurrentHashMap<>();
+
+    public double computePopularityScoreCached(Movie movie) {
+
+        if (movie == null) return 0.0;
+
+        return popularityCache.computeIfAbsent(movie.movieId(), id ->
+                computePopularityScore(movie)  // your existing scoring logic
+        );
+    }
+
+    public int getPopularityCacheSize() {
+        return popularityCache.size();
+    }
+
+    public final Cache<String, Double> genreCache = new InMemoryCache<>();
+    private final Cache<String, Double> actorCache = new InMemoryCache<>();
+    private final Cache<String, Double> ratingCache = new InMemoryCache<>();
+
+    public double computeGenreScoreCached(User user, Movie movie) {
+        String key = user.userId() + ":" + movie.movieId() + ":genre";
+
+        if (genreCache.contains(key)) {
+            return genreCache.get(key);
+        }
+
+        double score = computeGenreScore(user, movie);
+        genreCache.put(key, score);
+        return score;
+    }
+
+    public double computeActorScoreCached(User user, Movie movie) {
+        String key = user.userId() + ":" + movie.movieId() + ":actor";
+
+        if (actorCache.contains(key)) {
+            return actorCache.get(key);
+        }
+
+        double score = computeActorScore(user, movie);
+        actorCache.put(key, score);
+        return score;
+    }
+
+    public double computeRatingSimilarityScoreCached(User user, Movie movie) {
+        String key = user.userId() + ":" + movie.movieId() + ":rating";
+
+        if (ratingCache.contains(key)) {
+            return ratingCache.get(key);
+        }
+
+        double score = computeRatingSimilarityScore(user, movie);
+        ratingCache.put(key, score);
+        return score;
+    }
+
+
+
+
     public double computeGenreScore(User user, Movie movie){
             List<String> movieGenres = movie.genres();
             List<String> userPreferredGenres = user.preferredGenres();
@@ -98,10 +162,10 @@ public class RecommendationScoringService {
         {
             return 0.0;
         }
-        double genreScore = computeGenreScore(user,movie);
-        double actorScore = computeActorScore(user,movie);
-        double ratingSimilarity = computeRatingSimilarityScore(user,movie);
-        double popularityScore = computePopularityScore(movie);
+        double genreScore = computeGenreScoreCached(user,movie);
+        double actorScore = computeActorScoreCached(user,movie);
+        double ratingSimilarity = computeRatingSimilarityScoreCached(user,movie);
+        double popularityScore = computePopularityScoreCached(movie);
 
         return (genreScore * 0.35) + (actorScore * 0.25) + (ratingSimilarity * 0.20) + (popularityScore * 0.20);
     }
@@ -118,10 +182,10 @@ public class RecommendationScoringService {
                     return ms.sanitize(movie);
                 })
                 .map(movie -> {
-                    double genreScore = computeGenreScore(user,movie);
-                    double actorScore = computeActorScore(user,movie);
-                    double ratingSimilarity = computeRatingSimilarityScore(user,movie);
-                    double popularityScore = computePopularityScore(movie);
+                    double genreScore = computeGenreScoreCached(user,movie);
+                    double actorScore = computeActorScoreCached(user,movie);
+                    double ratingSimilarity = computeRatingSimilarityScoreCached(user,movie);
+                    double popularityScore = computePopularityScoreCached(movie);
                     double finalScore = (genreScore * 0.35) + (actorScore * 0.25) + (ratingSimilarity * 0.20) + (popularityScore * 0.20);
                     return new RecommendationDTO(movie.movieId(),movie.title(),finalScore,genreScore,actorScore,ratingSimilarity,popularityScore);
 
@@ -198,5 +262,159 @@ public class RecommendationScoringService {
                 explanation
         );
     }
+
+    public List<RecommendationDTO> getRecommendationsParallel(User user) {
+
+        if (user == null) {
+            return Collections.emptyList();
+        }
+
+            return CustomThreadPool.PARALLEL_POOL.submit(() ->
+                    MovieDataGenerator.getAllMovies()
+                            .parallelStream()
+                            .map(movie -> {
+                                MovieSanitizer ms = new MovieSanitizer();
+                                return ms.sanitize(movie);
+                            })
+                            .map(movie -> {
+                                double genre = computeGenreScoreCached(user, movie);
+                                double actor = computeActorScoreCached(user, movie);
+                                double ratingSim = computeRatingSimilarityScoreCached(user, movie);
+                                double popularity = computePopularityScoreCached(movie);
+                                double finalScore = finalRecommendationScore(user, movie);
+
+                                return new RecommendationDTO(
+                                        movie.movieId(),
+                                        movie.title(),
+                                        finalScore,
+                                        genre,
+                                        actor,
+                                        ratingSim,
+                                        popularity
+                                );
+                            })
+                            .sorted(Comparator.comparingDouble(RecommendationDTO::finalScore).reversed())
+                            .toList()
+            ).join();
+
+    }
+
+    public CompletableFuture<Double> computeGenreScoreAsync(User user, Movie movie) {
+        return CompletableFuture.supplyAsync(() -> computeGenreScoreCached(user, movie), CustomThreadPool.EXECUTOR_POOL);
+    }
+
+    public CompletableFuture<Double> computeActorScoreAsync(User user, Movie movie) {
+        return CompletableFuture.supplyAsync(() -> computeActorScoreCached(user, movie), CustomThreadPool.EXECUTOR_POOL);
+    }
+
+    public CompletableFuture<Double> computeRatingSimilarityScoreAsync(User user, Movie movie) {
+        return CompletableFuture.supplyAsync(() -> computeRatingSimilarityScoreCached(user, movie), CustomThreadPool.EXECUTOR_POOL);
+    }
+
+    public CompletableFuture<Double> computePopularityScoreAsync(Movie movie) {
+        return CompletableFuture.supplyAsync(() -> computePopularityScoreCached(movie), CustomThreadPool.EXECUTOR_POOL);
+    }
+
+    public CompletableFuture<Double> computeFinalScoreAsync(
+            CompletableFuture<Double> genreFuture,
+            CompletableFuture<Double> actorFuture,
+            CompletableFuture<Double> ratingFuture,
+            CompletableFuture<Double> popularityFuture
+    ) {
+        return genreFuture
+                .thenCombine(actorFuture, (genre, actor) -> genre * 0.35 + actor * 0.25)
+                .thenCombine(ratingFuture, (partial, rating) -> partial + rating * 0.20)
+                .thenCombine(popularityFuture, (partial, pop) -> partial + pop * 0.20);
+    }
+
+    public CompletableFuture<RecommendationDTO> computeRecommendationAsync(User user, Movie movie) {
+
+        CompletableFuture<Double> genreFuture = computeGenreScoreAsync(user, movie);
+        CompletableFuture<Double> actorFuture = computeActorScoreAsync(user, movie);
+        CompletableFuture<Double> ratingFuture = computeRatingSimilarityScoreAsync(user, movie);
+        CompletableFuture<Double> popularityFuture = computePopularityScoreAsync(movie);
+
+        CompletableFuture<Double> finalFuture =
+                computeFinalScoreAsync(genreFuture, actorFuture, ratingFuture, popularityFuture);
+
+        return finalFuture.thenApply(finalScore ->
+                new RecommendationDTO(
+                        movie.movieId(),
+                        movie.title(),
+                        finalScore,
+                        genreFuture.join(),
+                        actorFuture.join(),
+                        ratingFuture.join(),
+                        popularityFuture.join()
+                )
+        );
+    }
+
+    public CompletableFuture<List<RecommendationDTO>> getRecommendationsAsync(User user) {
+
+        if (user == null) {
+            return CompletableFuture.completedFuture(Collections.emptyList());
+        }
+
+        List<Movie> movies = MovieDataGenerator.getAllMovies();
+        if (movies == null || movies.isEmpty()) {
+            return CompletableFuture.completedFuture(Collections.emptyList());
+        }
+
+        // Step 1: Create async tasks for each movie
+        List<CompletableFuture<RecommendationDTO>> futures = movies.stream()
+                .map(movie -> computeRecommendationAsync(user, movie))
+                .toList();
+
+        // Step 2: Combine all futures
+        CompletableFuture<Void> allDone =
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+
+        // Step 3: Convert to CompletableFuture<List<DTO>>
+        return allDone.thenApply(v ->
+                futures.stream()
+                        .map(CompletableFuture::join)
+                        .sorted(Comparator.comparingDouble(RecommendationDTO::finalScore).reversed())
+                        .toList()
+        );
+    }
+
+    public CompletableFuture<List<RecommendationDTO>> getRecommendationsHybrid(User user) {
+
+        if (user == null) {
+            return CompletableFuture.completedFuture(Collections.emptyList());
+        }
+
+        List<Movie> movies = MovieDataGenerator.getAllMovies();
+        if (movies == null || movies.isEmpty()) {
+            return CompletableFuture.completedFuture(Collections.emptyList());
+        }
+
+            // Step 1: Submit parallel work to custom pool
+            return CustomThreadPool.PARALLEL_POOL.submit(() -> {
+
+                // Step 2: For each movie, start async scoring
+                List<CompletableFuture<RecommendationDTO>> futures = movies
+                        .parallelStream()
+                        .map(movie -> computeRecommendationAsync(user, movie))
+                        .toList();
+
+                // Step 3: Combine all async tasks
+                CompletableFuture<Void> allDone =
+                        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+
+                // Step 4: Build final sorted list
+                return allDone.thenApply(v ->
+                        futures.stream()
+                                .map(CompletableFuture::join)
+                                .sorted(Comparator.comparingDouble(RecommendationDTO::finalScore).reversed())
+                                .toList()
+                );
+
+            }).join(); // join the outer ForkJoinPool task
+
+
+    }
+
 
 }
